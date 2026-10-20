@@ -1,0 +1,73 @@
+name: Build app
+
+# Builds the Android app whenever you upload a file to this repository.
+# It uses the newest .zip in the repository (the app project) and, if you uploaded a newer
+# .html file after it, puts that in as the app page. Then it publishes Pullups.apk as a release.
+on:
+  push:
+    branches: [main, master]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Unpack the project
+        run: |
+          newest() { best=""; bt=0; for f in "$@"; do [ -f "$f" ] || continue; t=$(git log -1 --format=%ct -- "$f"); t=${t:-0}; if [ "$t" -ge "$bt" ]; then bt=$t; best=$f; fi; done; echo "$best|$bt"; }
+          shopt -s nullglob
+          z=$(newest *.zip); ZIP=${z%|*}; ZT=${z#*|}
+          if [ -z "$ZIP" ]; then echo "::error::No project .zip found. Upload pullups-app.zip to this repository (step 2 in the guide)."; exit 1; fi
+          echo "Project: $ZIP"
+          mkdir src && unzip -q "$ZIP" -d src
+          if [ ! -f src/settings.gradle ]; then inner=$(dirname "$(find src -name settings.gradle | head -1)"); [ -n "$inner" ] && [ "$inner" != "." ] && mv "$inner" proj && rm -rf src && mv proj src; fi
+          h=$(newest *.html); HTML=${h%|*}; HT=${h#*|}
+          if [ -n "$HTML" ] && [ "$HT" -ge "$ZT" ]; then echo "App page: $HTML"; cp "$HTML" src/app/src/main/assets/www/index.html; fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Unpack signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::The signing key is missing. Add the KEYSTORE_B64 and KEYSTORE_PASSWORD secrets (step 3 in the guide), then press Re-run."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | tr -d ' \r\n' | base64 -d > src/app/release.jks
+
+      - name: Build the APK
+        working-directory: src
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          VERSION_CODE: ${{ github.run_number }}
+          GH_REPO: ${{ github.repository }}
+        run: gradle --no-daemon assembleRelease
+
+      - name: Rename
+        run: cp src/app/build/outputs/apk/release/app-release.apk Pullups.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Version ${{ github.run_number }}
+          body: Install Pullups.apk on your phone. If the app is already installed, it updates in place and keeps your data.
+          files: Pullups.apk
+          make_latest: true
